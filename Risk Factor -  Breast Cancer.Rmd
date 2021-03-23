@@ -1,0 +1,277 @@
+---
+title: "Breast Cancer -- Risk Factor Detection"
+author: "Yaxin Guo"
+date: "3/17/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(gridExtra)
+library(broom)
+library(car)
+library(usdm)
+library(dplyr)
+library(corrplot)
+library(caret)
+library(corrr)
+library(kernlab)  
+library(e1071)    
+library(DT)
+library(pROC)
+
+# for plots
+theme.info <- theme(plot.title = element_text(size=16, hjust=0.5),
+                    axis.title = element_text(size=14),
+                    axis.text = element_text(size=14))
+
+```
+
+Section One: Read and process data #
+```{r, echo=FALSE,message = FALSE,warning = FALSE}
+y <- read_delim("data.csv", col_names=TRUE, delim=",", na=".")
+dim(y)
+head(y)
+
+# Column namesL
+name_factor <- colnames(y)
+
+# Remove X33 because it's NA
+y <- y[ , -33]
+name_factor <- colnames(y) # Update our factors's name in dataset
+
+# number of na
+sum(is.na(y)) # Looks good so far
+colnames(y) <- make.names(colnames(y))
+colnames(y) <- gsub("\\.*", "", colnames(y))
+y
+# Replace M with 1, which means being diagnosised, replace B with 0
+y$diagnosis <- as.numeric(gsub("M", 1, gsub("B", 0, y$diagnosis)))
+table(y$diagnosis)
+```
+Data Structure: 569 rows, 32 columns, and NA is zero
+
+Section two: Plot of Prediction varialbe 
+```{r,echo=FALSE,message = FALSE,warning = FALSE}
+
+plt.1 <- y %>% ggplot(aes(x = diagnosis)) + geom_bar( stat = "count", col="black", width = 0.7, fill="cadetblue" ) +
+  ggtitle("Diagnosis") +
+  labs(x="Diagnosis") +
+  geom_text(label = "Benign Number: 357", x= 0, y=369, size=4, color = "grey34", fontface = "bold") + 
+  geom_text(label = "Malignant Number: 212", x= 1, y=224, size=4, color = "grey34", fontface = "bold") + 
+  theme.info
+plt.1
+
+```
+
+There are 357 patients in our dataset that are Benign, and 212 patients are Malignant
+
+Section Three: Correlation Check 
+```{r, echo=FALSE,message = FALSE,warning = FALSE} 
+  
+corrdata <- y[,-c(1,2)]
+corrplot(cor(corrdata), order = "hclust", type = "upper")
+highly_col<- findCorrelation(cor(corrdata), cutoff = 0.9)
+cor(corrdata[,highly_col])
+
+# Let's assign these as one list which one of pairs variables that correlation is more than 0.9 from our dataset: which are concavepoints_mean, radius_worst, perimeter_mean, radius_mean,area_worst          
+high_risk <- c("concavepoints_mean", "radius_worst", "perimeter_mean", "radius_mean","area_worst")
+
+
+```
+
+Part 2 let's take a look at these high_risk variables
+```{r, echo=FALSE, message = FALSE,warning = FALSE}
+corrplot(cor(corrdata[, high_risk]), order = "hclust", type = "upper")
+
+```
+We can see that there is severe multicollinearity between these explanatory variables.
+
+
+# The next is Modeling part. There are two ways to build up predictive models. 
+
+Section Four: Modeling – Logistic Regression 
+
+Part One: There are severe multicollinearity issues in a dataset. Let’s start from the basic model (all variables included) to take a look
+```{r, echo=FALSE,message = FALSE,warning = FALSE}
+# Split our datasets into test data and training data
+
+set.seed(123)
+train_samples <- y$diagnosis %>%
+  createDataPartition(p = 0.75, list = FALSE)
+train_data <- y[train_samples,][, -1]
+test_data <- y[-train_samples,][,-1]
+lm.1 <- glm(diagnosis ~., family=binomial(link="logit") , data = train_data)
+summary(lm.1)
+
+
+
+```
+First model is so crazy. All of p-values are close to 1.
+
+Part Two: model two: Let’s remove the most severe multicollinearity varibles
+```{r,echo = FALSE , message = FALSE,warning = FALSE}
+train_data <- dplyr::select(train_data, -high_risk) 
+lm.2 <- glm(diagnosis~., family=binomial(link="logit") , data = train_data)
+summary(lm.2)
+```
+Looks better. But still not good enough.
+
+
+Part Three: Model Three: Calculate vif first and check correlation at the rest of the variables. Build model 3
+
+```{r, echo=FALSE, echo = FALSE }
+# VIF
+train_x <-train_data[, -c(1,2)]
+vif_table <- usdm::vif(as.data.frame(train_x[,]))
+vif_table
+
+# Select High VIF variables
+high_vif <- vif_table$Variables[which(vif_table$VIF >10)]
+
+train_data <- dplyr::select(train_data, -high_vif)
+train_x <-train_data[, -c(1,2)]
+
+# Modeling:
+lm.3 <- glm(diagnosis~., family=binomial(link="logit") , data = train_data)
+summary(lm.3)
+vif_table.1 <- usdm::vif(as.data.frame(train_x[,]))
+vif_table.1 
+```
+The VIF result from model 2 showed that some variables are highly affected by other variables, of which VIF values have been extremely high (more than 3000). Those variables need to be removed before building up model 3.
+Model 3 looks better. But there are still some variables that are not significant, which need to exclude from the model. The VIF results are all between 1 to 3, which shows a slight correlation between these variables.
+
+
+Part 4: Model 4
+```{r, echo = FALSE,message = FALSE, warning = FALSE}
+# Drop off non-significant variables
+drop.3 <- c("symmetry_mean", "texture_se","smoothness_se", "texture_worst")
+train_data <- dplyr::select(train_data, -drop.3)
+train_x <-train_data[, -c(1,2)]
+
+lm.4 <- glm(diagnosis~.,family=binomial(link="logit") , data = train_data)
+summary(lm.4)
+vif_table.2 <- usdm::vif(as.data.frame(train_x[,]))
+vif_table.2
+```
+Model 4 is good to go. There are four variables left as explanatory variables. The VIF values are all-around 1.5.
+
+Part 5: Prediction: First, find the best threshold which would not be baised towards positive or negatives. 
+```{r,echo=FALSE,message = FALSE, warning = FALSE}
+# save ROC curve into an object
+roc.info <- roc(response=train_data$diagnosis[complete.cases(train_data)], predictor= lm.4$fitted.values)
+
+best <- coords(roc.info, x="best", #no input the best, to find the best sen and specificty
+       ret=c("threshold", "specificity", "sensitivity"), 
+       transpose=FALSE)
+
+best
+train_data
+test_data <- test_data[, colnames(train_data)]
+
+pred_value <- predict(lm.4, newdata = test_data[,-c(1)])
+pred_value[pred_value < best$threshold] <- 0
+pred_value[pred_value >= best$threshold] <-1
+
+# Count Accuracy of Model
+accurary.1 <- length(which(test_data$diagnosis == pred_value))/length(pred_value)
+
+# Confusion table
+table.1 <- table(pred_value, test_data$diagnosis)
+table.1
+```
+The accuracy of the model in predicting Begin is around 75.7%. And the accuracy of the model for predicting Malignant is about 88.4%. The overall accuracy of the model is approximately 78.9%.
+
+
+
+
+Section Five: PCA (Principal Components Analysis). 
+In the original dataset, there are 30 explanatory variables and a vital sign of multicollinearity. By processing with PCA, we assumed the linearity of combinations of variables in the dataset, which is reasonable for the dataset because there is strong multicollinearity between variables. By combining high correlated variables, the complexity of the model can be reduced. Also, most importantly, it’s a reasonable way to deal with multicollinearity.
+
+
+Part One: Important Components Analysis
+```{r, echo=FALSE,message = FALSE, warning = FALSE}
+Pca_data <- princomp(cor(y[, -c(1,2)]), scores = TRUE)
+summary(Pca_data)
+
+```
+
+Part 2: Scree Plot 
+```{r, echo=FALSE,message = FALSE, warning = FALSE}
+sd_sq <- (Pca_data $sdev)^2
+d_df <- data.frame(PC = seq(1,30,1), Vari_explain = sd_sq/sum(sd_sq), Cum = cumsum(sd_sq/sum(sd_sq)))
+# filter dataframe to get data to be highligheted
+highlight_df <- d_df %>% 
+             filter(PC == 5)
+# plot 1: 
+d_df %>% ggplot(aes(x = PC, y = Vari_explain, group = 1))+
+  geom_point(size=1)+
+  geom_line()+
+  geom_point(data=highlight_df, 
+             aes(x=PC,y= Vari_explain), 
+             color='red',
+             size=2) + 
+  geom_text(label = "PC 5", x = 5, y = 0.2) + 
+  labs(title="Scree plot: PCA on scaled data")
+
+d_df %>% ggplot(aes(x = PC, y =Cum, group = 1))+
+  geom_point(size=1)+
+  geom_line() +
+  geom_point(data=highlight_df, 
+             aes(x=PC,y= Cum), 
+             color='red',
+             size=2) + 
+  geom_text(label = "PC 5", x = 5, y = 0.9) + 
+  labs(title="Cummulative Scree plot: PCA on scaled data")
+
+```
+   
+Scree-Plot shows that the first 5 PCs can explain 80% of the dataset's variance.
+
+Part 3:Dataset for Modeling:
+```{r,echo=FALSE,message = FALSE, warning = FALSE}
+df_d.1 <- prcomp(y[, -c(1,2)], scale = TRUE, center = TRUE) # Correlation Matrix
+summary(df_d.1)
+# rotated data (the centred (and scaled if requested) data multiplied by the rotation matrix)
+score <- df_d.1$x[,1:7]
+
+# Build dataframe to combine diagnosis and our score
+Lda_data <- cbind("Score" = score, "Diagnosis" = y$diagnosis)
+```
+
+Part 4:  LDA ( Linear discriminant function)
+```{r, echo=FALSE,message = FALSE, warning = FALSE}
+# split data
+
+set.seed(123)
+train_samples <- Lda_data[, 8]%>%
+  createDataPartition(p = 0.75, list = FALSE)
+
+lda_train <- as.data.frame(Lda_data[train_samples,][, -1]) 
+lad_test <- as.data.frame(Lda_data[-train_samples,][,-1])
+
+# LDA
+library(MASS)
+data_lad <- lda(Diagnosis~., data = lda_train)
+data_lad
+
+
+# Prediction:
+data_predict <- predict(data_lad, newdata = lad_test)
+pred_value.2 <- data_predict$class
+true_value <- lad_test$Diagnosis
+accuracy.2 <- length(which(pred_value.2 == true_value))/length(true_value)
+
+# Confusion table 
+table.2 <- table(pred_value.2, true_value)
+table.2
+```
+The accuracy of the model in predicting Begin is around 64.1%. And the accuracy of the model for predicting Malignant is about 84%. The overall accuracy of the model is approximately 73%.
+
+Section 7: Conclusion and Limitation 
+
+From the first model results, the most risk factors for breast cancer are texture_mean, smoothness_mean, symmetry_se, symmetry_worst.
+ 
+The two models both have a significant difference in predicting Begin Tumor and Malignant Tumor. This may be caused by splitting datasets and imbalance of dataset(Diagnosis for begin and malignant is not equal). In the following research, this is an excellent point to dive in.
